@@ -524,7 +524,7 @@ class Transformer(nn.Module):
         all_hidden_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
 
-        print('forward')
+        # print('forward')
         hidden_state = x
 
         all_residual_diffs = []
@@ -563,7 +563,7 @@ class Transformer(nn.Module):
             # print('output hidden states')
             all_hidden_states = all_hidden_states + (hidden_state,)
 
-        print("Return_dict:", return_dict)
+        # print("Return_dict:", return_dict)
         if not return_dict:
             return tuple(v for v in [hidden_state, all_hidden_states, all_attentions] if v is not None)
 
@@ -576,9 +576,9 @@ class Transformer(nn.Module):
         )
         # print('after output')
 
-        # print('outputs:', outputs)
-        print("residual_diffs 1:", all_residual_diffs[0].shape)
-        print('output length 2:', len(outputs))
+        # # print('outputs:', outputs)
+        # print("residual_diffs 1:", all_residual_diffs[0].shape)
+        # print('output length 2:', len(outputs))
 
         # print(outputs.shape)
         return outputs
@@ -1066,8 +1066,8 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
 
 
         # print("residual_diff:", residual_diff)
-        print("residual shape:", len(residual_diff))
-        print("residualdif0:", residual_diff[0].shape)
+        # print("residual shape:", len(residual_diff))
+        # print("residualdif0:", residual_diff[0].shape)
 
         hidden_states = self.dropout(hidden_states)
         logits = self.qa_outputs(hidden_states)
@@ -1092,8 +1092,8 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
             end_loss = loss_fct(end_logits, end_positions)
             task_loss = (start_loss + end_loss) / 2
 
-            print('task_loss:', task_loss)
-            print("task_loss.shape:", task_loss.shape)
+            # print('task_loss:', task_loss)
+            # print("task_loss.shape:", task_loss.shape)
 
             # === CLUB MI Regularization ===
             #Is this the I(Hi, Hi+1)?
@@ -1174,12 +1174,12 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
             # === CLUB Mutual Information Loss on Residuals ===
             lambda_coeff = 0  # leave as baseline
             if residual_diff is not None and len(residual_diff) > 1:
-                print("mi_loss2:", mi_loss)
+                # print("mi_loss2:", mi_loss)
                 total_loss = ((1 - lambda_coeff) * task_loss) + (lambda_coeff * mean_mi)
 
             else:
                 total_loss = task_loss
-            print("total_loss", total_loss)
+            # print("total_loss", total_loss)
 
         if not return_dict:
             output = (start_logits, end_logits, residual_diff) + distilbert_output[2:]
