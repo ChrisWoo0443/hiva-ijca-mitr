@@ -1101,13 +1101,42 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
             mi_list = []
             # if output_hidden_states and "residual_diff" in distilbert_output and distilbert_output["residual_diff"] is not None:
 
-            def robust_mean(x, c=1.0, eps=1e-8):
-                # weights down-weight large |x - median|
-                m = x.median()
+            # def robust_mean(x, c=1.0, eps=1e-8):
+            #     # weights down-weight large |x - median|
+            #     m = x.median()
+            #     r = (x - m).abs()
+            #     w = 1.0 / (1.0 + (r / c))          # smooth inverse-magnitude weights
+            #     w = w / (w.sum() + eps)
+            #     return (w * x).sum()
+            def robust_mean(tensors, c=1.0, eps=1e-8):
+                """
+                Compute robust mean of a list of tensors.
+                
+                Args:
+                    tensors: List of tensors (all should have the same shape)
+                    c: Tuning parameter for weight function
+                    eps: Small constant for numerical stability
+                
+                Returns:
+                    Tensor with the same shape as input tensors
+                """
+                # Stack tensors along a new dimension
+                x = torch.stack(tensors, dim=0)
+                
+                # Compute median along the stacked dimension
+                m = x.median(dim=0).values
+                
+                # Compute absolute residuals
                 r = (x - m).abs()
-                w = 1.0 / (1.0 + (r / c))          # smooth inverse-magnitude weights
-                w = w / (w.sum() + eps)
-                return (w * x).sum()
+                
+                # Compute weights (down-weight large deviations)
+                w = 1.0 / (1.0 + (r / c))
+                
+                # Normalize weights along the stacked dimension
+                w = w / (w.sum(dim=0, keepdim=True) + eps)
+                
+                # Compute weighted mean
+                return (w * x).sum(dim=0)
 
             # mean_val = robust_mean(xs, c=0.1)      # tune c to control outlier impact
 
@@ -1125,20 +1154,20 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
                     mi_list.append(mi_estimate)
 
                     # mi_loss += self.club(residuals[i], residuals[i+1]).mean()
-                    print("mi mean:", mi_loss)
+                    # print("mi mean:", mi_loss)
                 mi_loss = mi_loss / (len(residuals) - 1)
 
-                print("mi_loss:", mi_loss)
+                # print("mi_loss:", mi_loss)
 
             # mi_standardized= []
 
             # for mi in mi_list:
             #     mi_standardized.append()
             
-            print("Mean mi:", mi_list.mean())
+            # print("Mean mi:", mi_list.mean())
 
             mean_mi = robust_mean(mi_list, c=0.5)
-            print("Robust Mean mi:", mean_mi)
+            # print("Robust Mean mi:", mean_mi)
             
 
 
