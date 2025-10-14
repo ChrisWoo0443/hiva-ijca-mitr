@@ -1,0 +1,19 @@
+# pyproject.toml
+[project]
+name = "mitr"
+version = "0.1.0"
+description = "Modification of DistilBERT to Penalize Mutual Information"
+requires-python = ">=3.9"
+
+dependencies = [
+    "transformers>=4.40.0",
+    "datasets<2.16",
+    "evaluate",
+    "torch>=2.8.0",
+    "accelerate",
+    "numpy>=2.0.2",
+    "tqdm>=4.67.1",
+    "tensorboardx>=2.6.4",
+    "tensorflow>=2.20.0",
+    "matplotlib>=3.9.4",
+]
