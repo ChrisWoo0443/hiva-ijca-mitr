@@ -17,4 +17,5 @@ dependencies = [
     "tensorflow>=2.20.0",
     "matplotlib>=3.9.4",
     "ckatorch>=1.0.1",
+    "hf-transfer>=0.1.9",
 ]
