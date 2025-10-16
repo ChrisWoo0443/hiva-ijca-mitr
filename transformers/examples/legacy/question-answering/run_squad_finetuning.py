@@ -226,16 +226,16 @@ def train(args, train_dataset, model, tokenizer):
             # print("Loss:", loss)
 
             # log mi - safely extract mi_loss if available
-            # mi_loss = 0.0
-            # if hasattr(outputs, 'mi_loss') and outputs.mi_loss is not None:
-            #     mi_loss = outputs.mi_loss.item() if torch.is_tensor(outputs.mi_loss) else 0.0
-            # elif len(outputs) > 3:  # Check if mi_loss is in tuple output
-            #     try:
-            #         mi = outputs[-1]
-            #         if torch.is_tensor(mi):
-            #             mi_loss = mi.item()
-            #     except (IndexError, AttributeError):
-            #         mi_loss = 0.0
+            mi_loss = 0.0
+            if hasattr(outputs, 'mi_loss') and outputs.mi_loss is not None:
+                mi_loss = outputs.mi_loss.item() if torch.is_tensor(outputs.mi_loss) else 0.0
+            elif len(outputs) > 3:  # Check if mi_loss is in tuple output
+                try:
+                    mi = outputs[-1]
+                    if torch.is_tensor(mi):
+                        mi_loss = mi.item()
+                except (IndexError, AttributeError):
+                    mi_loss = 0.0
             
 
 
@@ -289,9 +289,9 @@ def train(args, train_dataset, model, tokenizer):
                     
                     logging_loss = tr_loss
 
-                    # if mi_loss != 0.0:
-                    #     tb_writer.add_scalar("mi_loss", mi_loss, global_step)
-                    #     logger.info(f"MI_loss: {mi_loss:.6f}")
+                    if mi_loss != 0.0:
+                        tb_writer.add_scalar("mi_loss", mi_loss, global_step)
+                        logger.info(f"MI_loss: {mi_loss:.6f}")
 
                     activations = outputs.hidden_states
 
