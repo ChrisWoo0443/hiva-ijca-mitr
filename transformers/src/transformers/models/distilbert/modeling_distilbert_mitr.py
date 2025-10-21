@@ -28,7 +28,12 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 
 # infonet stuff
-from .InfoNet.infer import load_model, estimate_mi, compute_smi_mean
+import sys
+infonet_path = '/workspace/hiva-ijca-mitr/transformers/src/transformers/models/distilbert/InfoNet'  # Adjust to your actual InfoNet location
+if infonet_path not in sys.path:
+    sys.path.insert(0, infonet_path)
+
+from infer import load_model, estimate_mi, compute_smi_mean
 config_path = "InfoNet/configs/config.yaml"
 ckpt_path = "InfoNetModelCheckpoint/model_5000_32_1000-720--0.16.pt"
 model = load_model(config_path, ckpt_path)
