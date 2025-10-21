@@ -19,14 +19,20 @@ part from HuggingFace PyTorch version of Google AI Bert model (https://github.co
 """
 
 import math
-
 from typing import Optional, Union
 
 import numpy as np
 import torch
-from .club import CLUB
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+
+
+# infonet stuff
+from .InfoNet.infer import load_model, estimate_mi, compute_smi_mean
+config_path = "InfoNet/configs/config.yaml"
+ckpt_path = "InfoNetModelCheckpoint/model_5000_32_1000-720--0.16.pt"
+model = load_model(config_path, ckpt_path)
+
 
 from ...activations import get_activation
 from ...configuration_utils import PretrainedConfig
@@ -54,8 +60,6 @@ from ...utils import (
     logging,
 )
 from .configuration_distilbert import DistilBertConfig
-from .club import CLUBSample  # adjust import if CLUB repo uses a different name
-
 
 
 if is_flash_attn_available():
@@ -511,26 +515,33 @@ class Transformer(nn.Module):
         self.layer = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
         self.gradient_checkpointing = False
 
-
     def forward(
         self,
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
-        output_hidden_states: bool = False,
+        output_hidden_states: bool = True,
         return_dict: Optional[bool] = None,
-    ) -> tuple[torch.Tensor, ...]:  # <-- KEEPING your original return type
+    ) -> Union[BaseModelOutput, tuple[torch.Tensor, ...]]:  # docstyle-ignore
+        """
+        Parameters:
+            x: torch.tensor(bs, seq_length, dim) Input sequence embedded.
+            attn_mask: torch.tensor(bs, seq_length) Attention mask on the sequence.
+
+        Returns:
+            hidden_state: torch.tensor(bs, seq_length, dim) Sequence of hidden states in the last (top)
+            layer all_hidden_states: tuple[torch.tensor(bs, seq_length, dim)]
+                Tuple of length n_layers with the hidden states from each layer.
+                Optional: only if output_hidden_states=True
+            all_attentions: tuple[torch.tensor(bs, n_heads, seq_length, seq_length)]
+                Tuple of length n_layers with the attention weights from each layer
+                Optional: only if output_attentions=True
+        """
         all_hidden_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
 
-        # print('forward')
         hidden_state = x
-
-        all_residual_diffs = []
-        prev_h = hidden_state  # initial hidden state before first layer
-
-
         for i, layer_module in enumerate(self.layer):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_state,)
@@ -541,56 +552,28 @@ class Transformer(nn.Module):
                 head_mask[i],
                 output_attentions,
             )
+
             hidden_state = layer_outputs[-1]
 
-            if i > 0:  # skip first layer since it has no previous hidden state
-                residual_diff = hidden_state - prev_h
-                all_residual_diffs.append(residual_diff)
-
-            prev_h = hidden_state  # store for next iteration
-
             if output_attentions:
-                # print('output attentions')
                 if len(layer_outputs) != 2:
                     raise ValueError(f"The length of the layer_outputs should be 2, but it is {len(layer_outputs)}")
+
                 attentions = layer_outputs[0]
                 all_attentions = all_attentions + (attentions,)
             else:
                 if len(layer_outputs) != 1:
                     raise ValueError(f"The length of the layer_outputs should be 1, but it is {len(layer_outputs)}")
 
+        # Add last layer
         if output_hidden_states:
-            # print('output hidden states')
             all_hidden_states = all_hidden_states + (hidden_state,)
 
-        # print("Return_dict:", return_dict)
         if not return_dict:
             return tuple(v for v in [hidden_state, all_hidden_states, all_attentions] if v is not None)
-
-        # print('before output')
-        outputs = BaseModelOutput(
-            last_hidden_state=hidden_state,
-            hidden_states=all_hidden_states,
-            attentions=all_attentions,
-            residual_diff=all_residual_diffs
+        return BaseModelOutput(
+            last_hidden_state=hidden_state, hidden_states=all_hidden_states, attentions=all_attentions
         )
-        # print('after output')
-
-        # # print('outputs:', outputs)
-        # print("residual_diffs 1:", all_residual_diffs[0].shape)
-        # print('output length 2:', len(outputs))
-
-        # print(outputs.shape)
-        return outputs
-
-        '''
-        consider 
-        Freezing everything but highest mi layer
-        Freezing everything below a certain threshold
-
-        Apply our loss function to only high mi layers
-        apply cross entropy to layers below threshold
-        '''
 
 
 # INTERFACE FOR ENCODER AND TASK SPECIFIC MODEL #
@@ -994,15 +977,9 @@ class DistilBertForSequenceClassification(DistilBertPreTrainedModel):
 class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
     def __init__(self, config: PretrainedConfig):
         super().__init__(config)
-        #Redundant
-        # self.club = CLUB(config.dim)
+
         self.distilbert = DistilBertModel(config)
         self.qa_outputs = nn.Linear(config.dim, config.num_labels)
-                # === CLUB Mutual Information Regularizer ===
-        self.lambda_val = 0.1  # weighting factor for MI loss
-        from .club import CLUBSample  # make sure CLUB repo is cloned into your project
-        self.club = CLUBSample(config.hidden_size, config.hidden_size, config.hidden_size)
-
         if config.num_labels != 2:
             raise ValueError(f"config.num_labels should be 2, but it is {config.num_labels}")
 
@@ -1010,8 +987,6 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
-
-        import torch.nn.functional as f
 
     def get_position_embeddings(self) -> nn.Embedding:
         """
@@ -1045,7 +1020,20 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[tuple[torch.Tensor, ...], QuestionAnsweringModelOutput]:
+    ) -> Union[QuestionAnsweringModelOutput, tuple[torch.Tensor, ...]]:
+        r"""
+        input_ids (`torch.LongTensor` of shape `(batch_size, num_choices)`):
+            Indices of input sequence tokens in the vocabulary.
+
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            [`PreTrainedTokenizer.__call__`] for details.
+
+            [What are input IDs?](../glossary#input-ids)
+        inputs_embeds (`torch.FloatTensor` of shape `(batch_size, num_choices, hidden_size)`, *optional*):
+            Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation. This
+            is useful if you want more control over how to convert `input_ids` indices into associated vectors than the
+            model's internal embedding lookup matrix.
+        """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         distilbert_output = self.distilbert(
@@ -1054,35 +1042,58 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,  # force tuple output to unpack residuals
+            output_hidden_states=True,  # Always output hidden states to print them
+            return_dict=return_dict,
         )
-        hidden_states = distilbert_output[0]
 
-        if distilbert_output.residual_diff is not None:
-            residual_diff = distilbert_output.residual_diff
-        else:
-            residual_diff = None
+        mi_list = []
+        prev_hidden_state = None
+        # Print each layer's hidden states
+        # index 0 is embeddings, index 1 is first layer, etc.
+        if distilbert_output.hidden_states is not None:
+            print(f"\n{'='*80}")
 
+            for i, layer_hidden_state in enumerate(distilbert_output.hidden_states):
+                if i == 0:
+                    # print(f"\nEmbedding layer hidden states shape: {layer_hidden_state.shape}")
+                    pass
+                
+                elif i == 1:    # first layer cant compare
+                    prev_hidden_state = layer_hidden_state
+                else:
+                    current_hidden_state = layer_hidden_state
+                    prev_layer = prev_hidden_state.squeeze(0).permute(1, 0, 2)  # (seq_len, dim)
+                    curr_layer = current_hidden_state.squeeze(0).permute(1, 0, 2)  # (seq_len, dim)
+                    mi = compute_smi_mean(
+                        prev_layer,
+                        curr_layer,
+                        model,
+                        prev_layer.shape[0],
+                        proj_num=1024,
+                        batchsize=32,
+                    )
+                    mi_list.append(mi.item())
+                    prev_hidden_state = current_hidden_state
+            print(f"{'='*80}\n")
 
-        # print("residual_diff:", residual_diff)
-        # print("residual shape:", len(residual_diff))
-        # print("residualdif0:", residual_diff[0].shape)
+            print("Mutual Information between layers:", mi_list)
 
-        hidden_states = self.dropout(hidden_states)
-        logits = self.qa_outputs(hidden_states)
+        hidden_states = distilbert_output[0]  # (bs, max_query_len, dim)
+
+        hidden_states = self.dropout(hidden_states)  # (bs, max_query_len, dim)
+        logits = self.qa_outputs(hidden_states)  # (bs, max_query_len, 2)
         start_logits, end_logits = logits.split(1, dim=-1)
-        start_logits = start_logits.squeeze(-1).contiguous()
-        end_logits = end_logits.squeeze(-1).contiguous()
+        start_logits = start_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
+        end_logits = end_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
 
         total_loss = None
-        mi_loss = None
         if start_positions is not None and end_positions is not None:
+            # If we are on multi-GPU, split add a dimension
             if len(start_positions.size()) > 1:
                 start_positions = start_positions.squeeze(-1)
             if len(end_positions.size()) > 1:
                 end_positions = end_positions.squeeze(-1)
-
+            # sometimes the start/end positions are outside our model inputs, we ignore these terms
             ignored_index = start_logits.size(1)
             start_positions = start_positions.clamp(0, ignored_index)
             end_positions = end_positions.clamp(0, ignored_index)
@@ -1090,110 +1101,19 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
             loss_fct = nn.CrossEntropyLoss(ignore_index=ignored_index)
             start_loss = loss_fct(start_logits, start_positions)
             end_loss = loss_fct(end_logits, end_positions)
-            task_loss = (start_loss + end_loss) / 2
-
-            # print('task_loss:', task_loss)
-            # print("task_loss.shape:", task_loss.shape)
-
-            # === CLUB MI Regularization ===
-            #Is this the I(Hi, Hi+1)?
-            mi_loss = 0.0
-            mi_list = []
-            # if output_hidden_states and "residual_diff" in distilbert_output and distilbert_output["residual_diff"] is not None:
-
-            # def robust_mean(x, c=1.0, eps=1e-8):
-            #     # weights down-weight large |x - median|
-            #     m = x.median()
-            #     r = (x - m).abs()
-            #     w = 1.0 / (1.0 + (r / c))          # smooth inverse-magnitude weights
-            #     w = w / (w.sum() + eps)
-            #     return (w * x).sum()
-            def robust_mean(tensors, c=1.0, eps=1e-8):
-                """
-                Compute robust mean of a list of tensors.
-                
-                Args:
-                    tensors: List of tensors (all should have the same shape)
-                    c: Tuning parameter for weight function
-                    eps: Small constant for numerical stability
-                
-                Returns:
-                    Tensor with the same shape as input tensors
-                """
-                # Stack tensors along a new dimension
-                x = torch.stack(tensors, dim=0)
-                
-                # Compute median along the stacked dimension
-                m = x.median(dim=0).values
-                
-                # Compute absolute residuals
-                r = (x - m).abs()
-                
-                # Compute weights (down-weight large deviations)
-                w = 1.0 / (1.0 + (r / c))
-                
-                # Normalize weights along the stacked dimension
-                w = w / (w.sum(dim=0, keepdim=True) + eps)
-                
-                # Compute weighted mean
-                return (w * x).sum(dim=0)
-
-            # mean_val = robust_mean(xs, c=0.1)      # tune c to control outlier impact
-
-            if distilbert_output["residual_diff"] is not None:
-                residuals = distilbert_output["residual_diff"]
-                for i in range(len(residuals) - 1):
-                    x = residuals[i].mean(dim=1)
-                    y = residuals[i+1].mean(dim=1)
-                    # normalize
-                    x = torch.nn.functional.layer_norm(x, (x.size(-1),))
-                    y = torch.nn.functional.layer_norm(y, (y.size(-1),))
-
-                    mi_estimate = self.club(x, y)
-                    mi_loss += -mi_estimate  # Penalize HIGH MI by flipping CLUB's sign
-                    mi_list.append(mi_estimate)
-
-                    # mi_loss += self.club(residuals[i], residuals[i+1]).mean()
-                    # print("mi mean:", mi_loss)
-                mi_loss = mi_loss / (len(residuals) - 1)
-
-                # print("mi_loss:", mi_loss)
-
-            # mi_standardized= []
-
-            # for mi in mi_list:
-            #     mi_standardized.append()
-            
-            # print("Mean mi:", mi_list.mean())
-
-            mean_mi = robust_mean(mi_list, c=0.5)
-            # print("Robust Mean mi:", mean_mi)
-            
-
-
-            # === CLUB Mutual Information Loss on Residuals ===
-            lambda_coeff = 1e-5  # leave as baseline
-            if residual_diff is not None and len(residual_diff) > 1:
-                # print("mi_loss2:", mi_loss)
-                total_loss = ((1 - lambda_coeff) * task_loss) + (lambda_coeff * mean_mi)
-
-            else:
-                total_loss = task_loss
-            # print("total_loss", total_loss)
+            total_loss = (start_loss + end_loss) / 2
 
         if not return_dict:
-            output = (start_logits, end_logits, residual_diff) + distilbert_output[2:]
+            output = (start_logits, end_logits) + distilbert_output[1:]
             return ((total_loss,) + output) if total_loss is not None else output
 
         return QuestionAnsweringModelOutput(
-                loss=total_loss,
-                start_logits=start_logits,
-                end_logits=end_logits,
-                hidden_states=distilbert_output.hidden_states,
-                attentions=distilbert_output.attentions,
-                residuals=residual_diff,
-                mi_loss=mi_loss,
-            )
+            loss=total_loss,
+            start_logits=start_logits,
+            end_logits=end_logits,
+            hidden_states=distilbert_output.hidden_states,
+            attentions=distilbert_output.attentions,
+        )
 
 
 @auto_docstring
@@ -1407,7 +1327,6 @@ class DistilBertForMultipleChoice(DistilBertPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
 
 
 __all__ = [
